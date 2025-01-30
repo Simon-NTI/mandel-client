@@ -6,7 +6,9 @@
 
 #include <curl/curl.h>
 
-#define print_progress 0
+// #define print_progress 0
+
+char server_adress[30] = {0};
 
 struct
 {
@@ -16,28 +18,36 @@ struct
     unsigned long total_padding;
     unsigned long image_size;
     unsigned long file_size;
+    unsigned long image_data_offset;
+    unsigned long color_count;
 
     unsigned char *bitmap;
 } file_info = {
     .total_header_size = 54,
-    .bits_per_pixel = 0,
+    .bits_per_pixel = 8,
     .padding = 0,
     .total_padding = 0,
     .image_size = 0,
-    .file_size = 0};
+    .file_size = 0,
+    .image_data_offset = 54 + 256 * 4};
 
 struct
 {
     unsigned long width;
-    const long double target_x;
-    const long double range_x;
+    long double target_x;
 
     unsigned long height;
-    const long double target_y;
-    const long double range_y;
+    long double target_y;
+
+    long double range;
 
     unsigned long max_iterations;
 
+    unsigned long fragment_count;
+
+    unsigned long current_fragment;
+
+    unsigned long total_fragments_recived;
 } render_info = {0};
 
 CURL *handle;
@@ -55,6 +65,7 @@ static size_t
 WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t realsize = size * nmemb;
+    // printf("Real size: %lu\n", realsize);
     struct MemoryStruct *mem = (struct MemoryStruct *)userp;
 
     char *ptr = realloc(mem->memory, mem->size + realsize + 1);
@@ -73,19 +84,68 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
     return realsize;
 }
 
+void parse_render_info()
+{
+    unsigned long *long_buffer_1 = malloc(8);
+    unsigned long *long_buffer_2 = malloc(8);
+    printf("Init buffers\n");
+
+    memcpy(long_buffer_1, chunk.memory, 8);
+    render_info.width = *long_buffer_1;
+    printf("Chunk contents: \n");
+    for (int i = 0; i < 8; i++)
+    {
+        printf("I %d: %u\n", i, chunk.memory[i]);
+    }
+    printf("\n");
+    printf("Width: %lu\n", render_info.width);
+
+    memcpy(long_buffer_1, chunk.memory + 8, 8);
+    render_info.height = *long_buffer_1;
+    printf("Height: %lu\n", render_info.width);
+
+    memcpy(long_buffer_1, chunk.memory + 16, 8);
+    memcpy(long_buffer_2, chunk.memory + 24, 8);
+    render_info.target_x = (long double)*long_buffer_1 / *long_buffer_2;
+    printf("Target X: %.10Lf\n", render_info.target_x);
+
+    memcpy(long_buffer_1, chunk.memory + 32, 8);
+    memcpy(long_buffer_2, chunk.memory + 40, 8);
+    render_info.target_y = (long double)*long_buffer_1 / *long_buffer_2;
+    printf("Target Y: %.10Lf\n", render_info.target_y);
+
+    memcpy(long_buffer_1, chunk.memory + 48, 8);
+    render_info.range = *long_buffer_1;
+    printf("Range: %.10Lf\n", render_info.range);
+
+    memcpy(long_buffer_1, chunk.memory + 56, 8);
+    render_info.max_iterations = *long_buffer_1;
+    printf("Max Iterations: %lu\n", render_info.max_iterations);
+
+    memcpy(long_buffer_1, chunk.memory + 64, 8);
+    render_info.fragment_count = *long_buffer_1;
+    printf("Fragment Count: %lu\n", render_info.fragment_count);
+
+    free(long_buffer_1);
+    free(long_buffer_2);
+}
+
 void calc_render_info()
 {
     file_info.padding = 4 - (((file_info.bits_per_pixel / 8) * render_info.width) % 4);
     file_info.total_padding = file_info.padding * render_info.height;
     file_info.image_size = (file_info.bits_per_pixel / 8) * (render_info.width * render_info.height) + file_info.total_padding;
-    file_info.file_size = file_info.total_header_size + file_info.image_size + file_info.total_padding;
+    file_info.file_size = file_info.total_header_size + file_info.image_size + file_info.total_padding + file_info.color_count * 4;
 }
 
 void send_fragment()
 {
-    curl_easy_setopt(handle, CURLOPT_URL, "http://localhost:3031/fragment");
+    char buffer[50] = {0};
+    snprintf(buffer, 50, "%s%s", server_adress, "/fragment");
+    curl_easy_setopt(handle, CURLOPT_URL, buffer);
+
     // /* Now specify we want to POST data */
-    // curl_easy_setopt(handle, CURLOPT_POST, 1L);
+    curl_easy_setopt(handle, CURLOPT_UPLOAD, 1L);
     // curl_easy_setopt(handle, CURLOPT_READFUNCTION, read_callback);
     // curl_easy_setopt(handle, CURLOPT_READDATA, &upload);
 
@@ -94,18 +154,20 @@ void send_fragment()
 
     /* Send */
 
-    FILE *test_ = fopen("data.bin", "wb");
+    // FILE *test_ = fopen("data.bin", "wb");
 
-    for (int i = 0; i < 50; i++)
-    {
-        fputc(97 + i, test_);
-    }
+    // for (int i = 0; i < 50; i++)
+    // {
+    //     fputc(97 + i, test_);
+    // }
 
     /* size of the POST data */
     curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, file_info.file_size);
+
     /* binary data */
     curl_easy_setopt(handle, CURLOPT_POSTFIELDS, file_info.bitmap);
-    printf("Sending data...\n");
+
+    printf("Sending fragment...\n");
     res = curl_easy_perform(handle);
 
     /* check for errors */
@@ -113,37 +175,83 @@ void send_fragment()
     {
         fprintf(stderr, "curl_easy_perform() failed: %s\n",
                 curl_easy_strerror(res));
+        exit(1);
     }
     else
     {
-        printf("Success\n");
+        printf("Success\n\n");
     }
 }
 
-void begin_compute()
+void init()
 {
-    curl_easy_setopt(handle, CURLOPT_URL, "http://localhost:3031/begin");
+    char buffer[50] = {0};
+    snprintf(buffer, 50, "%s%s", server_adress, "/init");
+    printf("Source: %s\n", buffer);
 
-    /* send all data to this function  */
+    curl_easy_setopt(handle, CURLOPT_URL, buffer);
+
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    /* we pass our 'chunk' struct to the callback function */
+
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, (void *)&chunk);
 
-    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 0);
-
-    printf("Awaiting response...\n");
+    printf("Awaiting initial data...\n");
     res = curl_easy_perform(handle);
 
-    /* check for errors */
     if (res != CURLE_OK)
     {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n",
-                curl_easy_strerror(res));
+        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        exit(1);
     }
-    else
+
+    printf("Data recieved\n");
+
+    parse_render_info();
+    calc_render_info();
+}
+
+int next_fragment()
+{
+    char buffer[50] = {0};
+    snprintf(buffer, 50, "%s%s", server_adress, "/fragment");
+    curl_easy_setopt(handle, CURLOPT_URL, buffer);
+
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA, (void *)&chunk);
+
+    printf("Awaiting next fragment...\n");
+    res = curl_easy_perform(handle);
+
+    if (res != CURLE_OK)
     {
-        printf("Success\n");
+        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        exit(1);
     }
+
+    printf("Chunk contents: \n");
+    for (int i = 0; i < 8; i++)
+    {
+        printf("I %d: %u\n", i, chunk.memory[72 + render_info.total_fragments_recived * 8 + i]);
+    }
+    printf("\n");
+
+    unsigned long *long_buffer = malloc(8);
+    memcpy(long_buffer, chunk.memory + (72 + render_info.total_fragments_recived * 8), 8);
+    if (*long_buffer == (1lu << 63))
+    {
+        printf("All fragments recieved\n");
+        return 0;
+    }
+
+    render_info.current_fragment = *long_buffer;
+    render_info.total_fragments_recived++;
+
+    printf("Fragment recieved: %lu\n", render_info.current_fragment);
+
+    free(long_buffer);
+
+    return 1;
 }
 
 void write_ulong_to_bitmap(long write_pos, unsigned long input)
@@ -152,55 +260,79 @@ void write_ulong_to_bitmap(long write_pos, unsigned long input)
     {
         for (int j = 0; j < 8; j++)
         {
-            bitmap[write_pos + i] |= ((input >> (i * 8)) & (1 << j));
+            file_info.bitmap[write_pos + i] = 0 | ((input >> (i * 8)) & (1 << j));
         }
     }
+
+    // TODO Using this loop, make the loop count a parameter to this function, then it can handle any amount of bytes, not just long
+    // Then you can replace all write calls which are two bytes or more with this function
+
+    // for (unsigned char i = 0; i < 8; i++)
+    // {
+    //     file_info.bitmap[write_pos + 8] = (input >> (i * 8) & 0xff);
+    // }
+
+    // fputc(value & 0xff, image);
+    // fputc(value >> 8 & 0xff, image);
+    // fputc(value >> 16 & 0xff, image);
+    // fputc(value >> 24 & 0xff, image);
+    // fputc(value >> 32 & 0xff, image);
+    // fputc(value >> 40 & 0xff, image);
+    // fputc(value >> 48 & 0xff, image);
+    // fputc(value >> 56 & 0xff, image);
 }
 
-void color_pixel(unsigned long write_pos, unsigned long iteration)
+void color_pixel_24(unsigned long write_pos, unsigned long iteration)
 {
-    unsigned char r = 255.0f * ((float)iteration / (float)max_iteration);
+    unsigned char r = 255.0f * ((float)iteration / (float)render_info.max_iterations);
     if (r > 255)
     {
         r = 255;
     }
 
-    unsigned char g = (unsigned long)(255.0f * (float)iteration / ((float)max_iteration / 10.0f)) % 255;
+    unsigned char g = (unsigned long)(255.0f * (float)iteration / ((float)render_info.max_iterations / 10.0f)) % 255;
     if (g > 255)
     {
         g = 255;
     }
 
-    unsigned char b = (unsigned long)(255.0f * (float)iteration / ((float)max_iteration / 100.0f)) % 255;
+    unsigned char b = (unsigned long)(255.0f * (float)iteration / ((float)render_info.max_iterations / 100.0f)) % 255;
     if (b > 255)
     {
         b = 255;
     }
 
-    bitmap[write_pos] = r;
-    bitmap[write_pos + 1] = g;
-    bitmap[write_pos + 2] = b;
+    file_info.bitmap[write_pos] = r;
+    file_info.bitmap[write_pos + 1] = g;
+    file_info.bitmap[write_pos + 2] = b;
 }
 
-void unoptimized_naive_escape_time(long double xmin, long double xmax, long double ymin, long double ymax)
+void color_pixel_8(unsigned long write_pos, unsigned long iteration)
 {
-    for (unsigned long pixel_y = 0; pixel_y < height; pixel_y++)
-    {
-        for (unsigned long pixel_x = 0; pixel_x < width; pixel_x++)
-        {
-            const unsigned long pixel_index = (pixel_y * width + pixel_x);
-            // const double difference = (float)pixel_index / (float)image_size;
-            const unsigned long write_pos = total_header_size + pixel_index * 3;
+    unsigned char color = ceil(255.0f * ((float)iteration / (float)render_info.max_iterations));
+    file_info.bitmap[write_pos] = color;
+}
 
-            long double x0 = xmin + (xmax - xmin) * ((double)pixel_x / (double)width);
-            long double y0 = ymin + (ymax - ymin) * ((double)pixel_y / (double)height);
+// Multithread this
+void escape_time(long double xmin, long double xmax, long double ymin, long double ymax)
+{
+    for (unsigned long pixel_y = 0; pixel_y < render_info.height; pixel_y++)
+    {
+        for (unsigned long pixel_x = 0; pixel_x < render_info.width; pixel_x++)
+        {
+            const unsigned long pixel_index = (pixel_y * render_info.width + pixel_x);
+            // const double difference = (float)pixel_index / (float)image_size;
+            const unsigned long write_pos = 8 + file_info.image_data_offset + pixel_index;
+
+            long double x0 = xmin + (xmax - xmin) * ((long double)pixel_x / (long double)render_info.width);
+            long double y0 = ymin + (ymax - ymin) * ((long double)pixel_y / (long double)render_info.height);
             long double x = 0;
             long double y = 0;
 
             unsigned long iteration = 0;
             // printf("Plotting pixel %lu at (%f, %f)\n", pixel_index, x0, y0);
 
-            while (x * x + y * y <= 4 && iteration < max_iteration)
+            while (x * x + y * y <= 4 && iteration < render_info.max_iterations)
             {
                 long double xtemp = x * x - y * y + x0;
                 y = 2 * x * y + y0;
@@ -208,64 +340,27 @@ void unoptimized_naive_escape_time(long double xmin, long double xmax, long doub
                 iteration++;
             }
 
-            color_pixel(write_pos, iteration);
+            color_pixel_8(write_pos, iteration);
         }
-
-#ifdef print_progress
-
-        if (pixel_y % (unsigned long)((float)height / 100.0f) == 0)
-        {
-            printf("%d%%\n", (unsigned int)((float)pixel_y / ((float)height / 100.0f)) + 1);
-        }
-#endif
-    }
-}
-
-void optimized_naive_escape_time(long double xmin, long double xmax, long double ymin, long double ymax)
-{
-    for (unsigned long pixel_y = 0; pixel_y < height; pixel_y++)
-    {
-        for (unsigned long pixel_x = 0; pixel_x < width; pixel_x++)
-        {
-            const unsigned long pixel_index = (pixel_y * width + pixel_x);
-            // const double difference = (float)pixel_index / (float)image_size;
-            const unsigned long write_pos = total_header_size + pixel_index * 3;
-
-            long double x0 = xmin + (xmax - xmin) * ((double)pixel_x / (double)width);
-            long double x = 0;
-            long double x2 = 0;
-
-            long double y0 = ymin + (ymax - ymin) * ((double)pixel_y / (double)height);
-            long double y = 0;
-            long double y2 = 0;
-
-            unsigned long iteration = 0;
-            // printf("Plotting pixel %lu at (%f, %f)\n", pixel_index, x0, y0);
-
-            while (x2 + y2 <= 4 && iteration < max_iteration)
-            {
-                y = 2 * x * y + y0;
-                x = x2 - y2 + x0;
-                x2 = x * x;
-                y2 = y * y;
-                iteration++;
-            }
-
-            color_pixel(write_pos, iteration);
-        }
-
-#ifdef print_progress
-        // BUG, this line of code may result in pixel_y % 0 when height < 100
-        if (pixel_y % (unsigned long)((float)height / 100.0f) == 0)
-        {
-            printf("%u%%\n", (unsigned int)((float)pixel_y / ((float)height / 100.0f)) + 1);
-        }
-#endif
     }
 }
 
 int main()
 {
+    printf("Please input the server adress (http://{ip}:{port})\n");
+    fgets(server_adress, sizeof(server_adress), stdin);
+
+    for (int i = 0; i < sizeof(server_adress); i++)
+    {
+        if (server_adress[i] == '\n')
+        {
+            server_adress[i] = 0;
+            break;
+        }
+    }
+
+    printf("Server adress: %s\n", server_adress);
+
     curl_global_init(CURL_GLOBAL_ALL);
 
     /* init the curl session */
@@ -275,140 +370,40 @@ int main()
     field, so we provide one */
     curl_easy_setopt(handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
 
-    // Debugging
-    curl_easy_setopt(handle, CURLOPT_VERBOSE, 1L);
+    /* Vebose debbugging */
+    // curl_easy_setopt(handle, CURLOPT_VERBOSE, 1L);
 
-    // clang-format off
-    /* identifier */
-    bitmap[0] = 0x42;
-    bitmap[1] = 0x4D;
+    /* Do not timeout */
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 0);
 
-    /* File size in bytes */
-    write_ulong_to_bitmap(2, file_size);
-    
-    // bitmap[6] = 66;
-    // bitmap[7] = 0;
-    // bitmap[8] = 0;
-    // bitmap[9] = 0;
+    init();
 
-    /* Reserved field */
-    bitmap[6] = 0;
-    bitmap[7] = 0;
-    bitmap[8] = 0;
-    bitmap[9] = 0;
+    file_info.bitmap = malloc(file_info.file_size);
 
-    /* Offset to image data, bytes */
-    // sprintf(bitmap + 10, "%ld", total_header_size);
-    bitmap[10] = 54;
-    bitmap[11] = 0;
-    bitmap[12] = 0;
-    bitmap[13] = 0;
-
-    /* Header size in bytes */
-    bitmap[14] = 40;
-    bitmap[15] = 0;
-    bitmap[16] = 0;
-    bitmap[17] = 0;
-
-    /* Width of image */
-    write_ulong_to_bitmap(18, width);
-
-    /* Height of image */
-    write_ulong_to_bitmap(22, height);
-    
-    /* Number of colour planes */
-    bitmap[26] = 1;
-    bitmap[27] = 0;
-
-    /* Bits per pixel */
-    bitmap[28] = 24;
-    bitmap[29] = 0;
-
-    /* Compression type */
-    bitmap[30] = 0;
-    bitmap[31] = 0;
-    bitmap[32] = 0;
-    bitmap[33] = 0;
-
-    /* Image size in bytes */
-    write_ulong_to_bitmap(34, image_size);
-
-    /* Horizontal pixels per meter */
-    bitmap[38] = 0;
-    bitmap[39] = 0;
-    bitmap[40] = 0;
-    bitmap[41] = 0;
-
-    /* Horizontal pixels per meter */
-    bitmap[42] = 0;
-    bitmap[43] = 0;
-    bitmap[44] = 0;
-    bitmap[45] = 0;
-
-    /* Number of colours */
-    bitmap[46] = 0;
-    bitmap[47] = 0;
-    bitmap[48] = 0;
-    bitmap[49] = 0;
-
-    /* Important colours */
-    bitmap[50] = 0;
-    bitmap[51] = 0;
-    bitmap[52] = 0;
-    bitmap[53] = 0;
-
-    // clang-format on
-
-    // {
-    //     printf("Painting bitmap...\n");
-    //     float difference = (float)image_size / 255.0f;
-    //     // printf("%f\n", difference);
-
-    //     for (long y = 0; y < height; y++)
-    //     {
-    //         for (long x = 0; x < width; x++)
-    //         {
-    //             unsigned long pixel_index = y * width + x;
-    //             unsigned long write_pos = total_header_size + pixel_index * 3 + y * padding;
-    //             unsigned char color = pixel_index % 2;
-
-    //             bitmap[write_pos] = 255 * color;
-    //             bitmap[write_pos + 1] = 255 * color;
-    //             bitmap[write_pos + 2] = 255 * color;
-    //         }
-    //     }
-    // }
-
-    begin_compute();
-
-    clock_t time_render_start = clock();
-    printf("Rendering...\n");
-    unoptimized_naive_escape_time(target_x - range / 2, target_x + range / 2, target_y - range / 2, target_y + range / 2);
-    // optimized_naive_escape_time(target_x - range / 2, target_x + range / 2, target_y - range / 2, target_y + range / 2);
-    clock_t time_render_end = clock();
-    printf("Render complete. Time: %f\n", ((time_render_end - time_render_start) / (float)CLOCKS_PER_SEC));
-
-    FILE *f_image = fopen("image.bmp", "wb");
-
-    // printf("--- Full Bitmap info ---\n");
-
-    clock_t time_write_start = clock();
-    printf("Writing to file...");
-    for (int i = 0; i < file_size; i++)
+    while (1)
     {
-        fputc(bitmap[i], f_image);
-        // printf("Value at byte %d: %u\n", i, bitmap[i]);
+        curl_easy_setopt(handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
+
+        // curl_easy_setopt(handle, CURLOPT_VERBOSE, 1L);
+
+        printf("%lu \n", render_info.current_fragment);
+        curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 0);
+        write_ulong_to_bitmap(0, render_info.current_fragment);
+
+        next_fragment();
+
+        clock_t time_render_start = clock();
+        printf("Rendering...\n");
+        escape_time(render_info.target_x - render_info.range / 2, render_info.target_x + render_info.range / 2, render_info.target_y - render_info.range / 2, render_info.target_y + render_info.range / 2);
+        clock_t time_render_end = clock();
+        printf("Render complete. Time: %f\n", ((time_render_end - time_render_start) / (float)CLOCKS_PER_SEC));
+
+        send_fragment();
+
+        curl_easy_reset(handle);
     }
-    clock_t time_write_end = clock();
-    printf("Write complete. Time: %f\n", ((time_write_end - time_write_start) / (float)CLOCKS_PER_SEC));
 
-    fclose(f_image);
-
-    send_fragment();
-
-    /* cleanup curl stuff */
     curl_easy_cleanup(handle);
 
-    /* we are done with libcurl, so clean it up */
     curl_global_cleanup();
 }
