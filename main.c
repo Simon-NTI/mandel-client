@@ -65,13 +65,11 @@ static size_t
 WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
     size_t realsize = size * nmemb;
-    // printf("Real size: %lu\n", realsize);
     struct MemoryStruct *mem = (struct MemoryStruct *)userp;
 
     char *ptr = realloc(mem->memory, mem->size + realsize + 1);
     if (!ptr)
     {
-        /* out of memory! */
         printf("not enough memory (realloc returned NULL)\n");
         return 0;
     }
@@ -115,14 +113,15 @@ void parse_render_info()
     printf("Target Y: %.10Lf\n", render_info.target_y);
 
     memcpy(long_buffer_1, chunk.memory + 48, 8);
-    render_info.range = *long_buffer_1;
+    memcpy(long_buffer_2, chunk.memory + 56, 8);
+    render_info.range = (long double)*long_buffer_1 / *long_buffer_2;
     printf("Range: %.10Lf\n", render_info.range);
 
-    memcpy(long_buffer_1, chunk.memory + 56, 8);
+    memcpy(long_buffer_1, chunk.memory + 64, 8);
     render_info.max_iterations = *long_buffer_1;
     printf("Max Iterations: %lu\n", render_info.max_iterations);
 
-    memcpy(long_buffer_1, chunk.memory + 64, 8);
+    memcpy(long_buffer_1, chunk.memory + 72, 8);
     render_info.fragment_count = *long_buffer_1;
     printf("Fragment Count: %lu\n", render_info.fragment_count);
 
@@ -138,7 +137,7 @@ void calc_render_info()
     file_info.file_size = file_info.total_header_size + file_info.image_size + file_info.total_padding + file_info.color_count * 4;
 }
 
-void send_fragment()
+int send_fragment()
 {
     char buffer[50] = {0};
     snprintf(buffer, 50, "%s%s", server_adress, "/fragment");
@@ -149,19 +148,8 @@ void send_fragment()
     // curl_easy_setopt(handle, CURLOPT_READFUNCTION, read_callback);
     // curl_easy_setopt(handle, CURLOPT_READDATA, &upload);
 
-    // /* Set the expected upload size. */
-    // curl_easy_setopt(handle, CURLOPT_INFILESIZE_LARGE, (curl_off_t)upload.sizeleft);
-
-    /* Send */
-
-    // FILE *test_ = fopen("data.bin", "wb");
-
-    // for (int i = 0; i < 50; i++)
-    // {
-    //     fputc(97 + i, test_);
-    // }
-
     /* size of the POST data */
+    printf("");
     curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, file_info.file_size);
 
     /* binary data */
@@ -179,7 +167,9 @@ void send_fragment()
     }
     else
     {
-        printf("Success\n\n");
+        printf("Fragment Sent\n");
+        printf("--------------------------------\n");
+        return 1;
     }
 }
 
@@ -187,7 +177,6 @@ void init()
 {
     char buffer[50] = {0};
     snprintf(buffer, 50, "%s%s", server_adress, "/init");
-    printf("Source: %s\n", buffer);
 
     curl_easy_setopt(handle, CURLOPT_URL, buffer);
 
@@ -207,7 +196,9 @@ void init()
     printf("Data recieved\n");
 
     parse_render_info();
-    calc_render_info();
+    // calc_render_info();
+    file_info.file_size = render_info.width * render_info.height + 8;
+    printf("File size: %lu\n", file_info.file_size);
 }
 
 int next_fragment()
@@ -229,39 +220,40 @@ int next_fragment()
         exit(1);
     }
 
-    printf("Chunk contents: \n");
-    for (int i = 0; i < 8; i++)
-    {
-        printf("I %d: %u\n", i, chunk.memory[72 + render_info.total_fragments_recived * 8 + i]);
-    }
-    printf("\n");
-
     unsigned long *long_buffer = malloc(8);
-    memcpy(long_buffer, chunk.memory + (72 + render_info.total_fragments_recived * 8), 8);
-    if (*long_buffer == (1lu << 63))
+    memcpy(long_buffer, chunk.memory + (80 + render_info.total_fragments_recived * 8), 8);
+
+    if (*long_buffer == 0xffffffffffffffff)
     {
-        printf("All fragments recieved\n");
-        return 0;
+        free(long_buffer);
+        return 1;
     }
 
     render_info.current_fragment = *long_buffer;
+
+    free(long_buffer);
+
     render_info.total_fragments_recived++;
 
     printf("Fragment recieved: %lu\n", render_info.current_fragment);
 
-    free(long_buffer);
-
-    return 1;
+    return 0;
 }
 
 void write_ulong_to_bitmap(long write_pos, unsigned long input)
 {
-    for (int i = 0; i < 4; i++)
+    printf("Writing ulong to bitmap: %lu\n", input);
+    // for (int i = 0; i < 8; i++)
+    // {
+    //     for (int j = 0; j < 8; j++)
+    //     {
+    //         file_info.bitmap[write_pos + i] = 0 | ((input >> (i * 8)) & (1 << j));
+    //     }
+    // }
+
+    for (unsigned char i = 0; i < 8; i++)
     {
-        for (int j = 0; j < 8; j++)
-        {
-            file_info.bitmap[write_pos + i] = 0 | ((input >> (i * 8)) & (1 << j));
-        }
+        file_info.bitmap[write_pos + i * 8] = (input >> (i * 8) & 0xff);
     }
 
     // TODO Using this loop, make the loop count a parameter to this function, then it can handle any amount of bytes, not just long
@@ -281,7 +273,6 @@ void write_ulong_to_bitmap(long write_pos, unsigned long input)
     // fputc(value >> 48 & 0xff, image);
     // fputc(value >> 56 & 0xff, image);
 }
-
 void color_pixel_24(unsigned long write_pos, unsigned long iteration)
 {
     unsigned char r = 255.0f * ((float)iteration / (float)render_info.max_iterations);
@@ -310,6 +301,7 @@ void color_pixel_24(unsigned long write_pos, unsigned long iteration)
 void color_pixel_8(unsigned long write_pos, unsigned long iteration)
 {
     unsigned char color = ceil(255.0f * ((float)iteration / (float)render_info.max_iterations));
+
     file_info.bitmap[write_pos] = color;
 }
 
@@ -330,7 +322,6 @@ void escape_time(long double xmin, long double xmax, long double ymin, long doub
             long double y = 0;
 
             unsigned long iteration = 0;
-            // printf("Plotting pixel %lu at (%f, %f)\n", pixel_index, x0, y0);
 
             while (x * x + y * y <= 4 && iteration < render_info.max_iterations)
             {
@@ -347,7 +338,7 @@ void escape_time(long double xmin, long double xmax, long double ymin, long doub
 
 int main()
 {
-    printf("Please input the server adress (http://{ip}:{port})\n");
+    printf("Please input the server adress ({protocol}://{ip}:{port})\n");
     fgets(server_adress, sizeof(server_adress), stdin);
 
     for (int i = 0; i < sizeof(server_adress); i++)
@@ -378,6 +369,8 @@ int main()
 
     init();
 
+    printf("---------------------\n");
+
     file_info.bitmap = malloc(file_info.file_size);
 
     while (1)
@@ -386,11 +379,17 @@ int main()
 
         // curl_easy_setopt(handle, CURLOPT_VERBOSE, 1L);
 
-        printf("%lu \n", render_info.current_fragment);
         curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 0);
-        write_ulong_to_bitmap(0, render_info.current_fragment);
 
-        next_fragment();
+        if (next_fragment())
+        {
+            printf("Final fragment recieved.\n");
+            break;
+        }
+
+        printf("Current fragment: %lu \n", render_info.current_fragment);
+
+        write_ulong_to_bitmap(0, render_info.current_fragment);
 
         clock_t time_render_start = clock();
         printf("Rendering...\n");
