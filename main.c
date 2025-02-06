@@ -10,6 +10,8 @@
 
 char server_adress[30] = {0};
 
+int zero_count = 0;
+
 struct
 {
     unsigned char total_header_size;
@@ -48,6 +50,9 @@ struct
     unsigned long current_fragment;
 
     unsigned long total_fragments_recived;
+
+    unsigned long y_start;
+    unsigned long y_end;
 } render_info = {0};
 
 CURL *handle;
@@ -84,8 +89,8 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
 
 void parse_render_info()
 {
-    unsigned long *long_buffer_1 = malloc(8);
-    unsigned long *long_buffer_2 = malloc(8);
+    long *long_buffer_1 = malloc(8);
+    long *long_buffer_2 = malloc(8);
     printf("Init buffers\n");
 
     memcpy(long_buffer_1, chunk.memory, 8);
@@ -139,17 +144,15 @@ void calc_render_info()
 
 int send_fragment()
 {
-    char buffer[50] = {0};
-    snprintf(buffer, 50, "%s%s", server_adress, "/fragment");
-    curl_easy_setopt(handle, CURLOPT_URL, buffer);
+    char dest_buffer[50] = {0};
+    snprintf(dest_buffer, 50, "%s%s", server_adress, "/fragment");
+    curl_easy_setopt(handle, CURLOPT_URL, dest_buffer);
 
-    // /* Now specify we want to POST data */
     curl_easy_setopt(handle, CURLOPT_UPLOAD, 1L);
     // curl_easy_setopt(handle, CURLOPT_READFUNCTION, read_callback);
     // curl_easy_setopt(handle, CURLOPT_READDATA, &upload);
 
     /* size of the POST data */
-    printf("");
     curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, file_info.file_size);
 
     /* binary data */
@@ -197,7 +200,7 @@ void init()
 
     parse_render_info();
     // calc_render_info();
-    file_info.file_size = render_info.width * render_info.height + 8;
+    file_info.file_size = ((double)render_info.width / render_info.fragment_count) * render_info.height + 8;
     printf("File size: %lu\n", file_info.file_size);
 }
 
@@ -237,20 +240,27 @@ int next_fragment()
 
     printf("Fragment recieved: %lu\n", render_info.current_fragment);
 
+    if (render_info.current_fragment == 0)
+    {
+        zero_count++;
+    }
+
+    if (zero_count > 1)
+    {
+        return 1;
+    }
+
+    render_info.y_start = render_info.height * ((double)render_info.current_fragment / render_info.fragment_count);
+    render_info.y_end = render_info.height * (((double)render_info.current_fragment + 1) / render_info.fragment_count);
+
+    printf("Y start: %lu\n", render_info.y_start);
+    printf("Y end: %lu\n", render_info.y_end);
+
     return 0;
 }
 
 void write_ulong_to_bitmap(long write_pos, unsigned long input)
 {
-    printf("Writing ulong to bitmap: %lu\n", input);
-    // for (int i = 0; i < 8; i++)
-    // {
-    //     for (int j = 0; j < 8; j++)
-    //     {
-    //         file_info.bitmap[write_pos + i] = 0 | ((input >> (i * 8)) & (1 << j));
-    //     }
-    // }
-
     for (unsigned char i = 0; i < 8; i++)
     {
         file_info.bitmap[write_pos + i * 8] = (input >> (i * 8) & 0xff);
@@ -302,19 +312,21 @@ void color_pixel_8(unsigned long write_pos, unsigned long iteration)
 {
     unsigned char color = ceil(255.0f * ((float)iteration / (float)render_info.max_iterations));
 
+    // unsigned char color = 255 * (render_info.current_fragment % 2);
+
     file_info.bitmap[write_pos] = color;
 }
 
 // Multithread this
 void escape_time(long double xmin, long double xmax, long double ymin, long double ymax)
 {
-    for (unsigned long pixel_y = 0; pixel_y < render_info.height; pixel_y++)
+    for (unsigned long pixel_y = render_info.y_start; pixel_y < render_info.y_end; pixel_y++)
     {
         for (unsigned long pixel_x = 0; pixel_x < render_info.width; pixel_x++)
         {
-            const unsigned long pixel_index = (pixel_y * render_info.width + pixel_x);
+            const unsigned long pixel_index = ((pixel_y - render_info.y_start) * render_info.width + pixel_x);
             // const double difference = (float)pixel_index / (float)image_size;
-            const unsigned long write_pos = 8 + file_info.image_data_offset + pixel_index;
+            const unsigned long write_pos = 8 + pixel_index;
 
             long double x0 = xmin + (xmax - xmin) * ((long double)pixel_x / (long double)render_info.width);
             long double y0 = ymin + (ymax - ymin) * ((long double)pixel_y / (long double)render_info.height);
@@ -361,9 +373,6 @@ int main()
     field, so we provide one */
     curl_easy_setopt(handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
 
-    /* Vebose debbugging */
-    // curl_easy_setopt(handle, CURLOPT_VERBOSE, 1L);
-
     /* Do not timeout */
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 0);
 
@@ -372,7 +381,6 @@ int main()
     printf("---------------------\n");
 
     file_info.bitmap = malloc(file_info.file_size);
-
     while (1)
     {
         curl_easy_setopt(handle, CURLOPT_USERAGENT, "libcurl-agent/1.0");
@@ -387,8 +395,6 @@ int main()
             break;
         }
 
-        printf("Current fragment: %lu \n", render_info.current_fragment);
-
         write_ulong_to_bitmap(0, render_info.current_fragment);
 
         clock_t time_render_start = clock();
@@ -400,6 +406,8 @@ int main()
         send_fragment();
 
         curl_easy_reset(handle);
+
+        // free(file_info.bitmap);
     }
 
     curl_easy_cleanup(handle);
