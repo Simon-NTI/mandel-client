@@ -8,30 +8,15 @@
 
 // #define print_progress 0
 
-char server_adress[30] = {0};
-
-int zero_count = 0;
+char server_adress[50] = {0};
 
 struct
 {
-    unsigned char total_header_size;
-    unsigned char bits_per_pixel;
-    unsigned char padding;
-    unsigned long total_padding;
-    unsigned long image_size;
     unsigned long file_size;
-    unsigned long image_data_offset;
-    unsigned long color_count;
-
     unsigned char *bitmap;
 } file_info = {
-    .total_header_size = 54,
-    .bits_per_pixel = 8,
-    .padding = 0,
-    .total_padding = 0,
-    .image_size = 0,
     .file_size = 0,
-    .image_data_offset = 54 + 256 * 4};
+};
 
 struct
 {
@@ -134,14 +119,6 @@ void parse_render_info()
     free(long_buffer_2);
 }
 
-void calc_render_info()
-{
-    file_info.padding = 4 - (((file_info.bits_per_pixel / 8) * render_info.width) % 4);
-    file_info.total_padding = file_info.padding * render_info.height;
-    file_info.image_size = (file_info.bits_per_pixel / 8) * (render_info.width * render_info.height) + file_info.total_padding;
-    file_info.file_size = file_info.total_header_size + file_info.image_size + file_info.total_padding + file_info.color_count * 4;
-}
-
 int send_fragment()
 {
     char dest_buffer[50] = {0};
@@ -199,7 +176,7 @@ void init()
     printf("Data recieved\n");
 
     parse_render_info();
-    // calc_render_info();
+
     file_info.file_size = ((double)render_info.width / render_info.fragment_count) * render_info.height + 8;
     printf("File size: %lu\n", file_info.file_size);
 }
@@ -239,16 +216,6 @@ int next_fragment()
     render_info.total_fragments_recived++;
 
     printf("Fragment recieved: %lu\n", render_info.current_fragment);
-
-    if (render_info.current_fragment == 0)
-    {
-        zero_count++;
-    }
-
-    if (zero_count > 1)
-    {
-        return 1;
-    }
 
     render_info.y_start = render_info.height * ((double)render_info.current_fragment / render_info.fragment_count);
     render_info.y_end = render_info.height * (((double)render_info.current_fragment + 1) / render_info.fragment_count);
@@ -311,8 +278,6 @@ void color_pixel_24(unsigned long write_pos, unsigned long iteration)
 void color_pixel_8(unsigned long write_pos, unsigned long iteration)
 {
     unsigned char color = ceil(255.0f * ((float)iteration / (float)render_info.max_iterations));
-
-    // unsigned char color = 255 * (render_info.current_fragment % 2);
 
     file_info.bitmap[write_pos] = color;
 }
@@ -406,8 +371,6 @@ int main()
         send_fragment();
 
         curl_easy_reset(handle);
-
-        // free(file_info.bitmap);
     }
 
     curl_easy_cleanup(handle);
